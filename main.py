@@ -1,157 +1,191 @@
-from fastapi import FastAPI
+import os
+import json
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from google import genai
+from typing import List, Dict, Any
 
-app = FastAPI(title="Dental Chat API", version="1.0")
+# ---------------- APP SETUP ----------------
+app = FastAPI(title="Dental AI Agent")
 
-# =========================
-# STATE INIT
-# =========================
-def start_state():
-    return {
-        "mode": None,
-        "answers": {},
-        "asked": [],
-        "current_q": "mode"
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+
+# ---------------- STATIC TREATMENTS DB ----------------
+TREATMENTS = {
+    "dental crowns": {
+        "publicId": "01960000-0000-7000-8000-000000000107",
+        "name": "Dental Crowns",
+        "description": "Tooth-shaped cap placed over a damaged tooth to restore its shape and strength."
+    },
+    "dental implants": {
+        "publicId": "01960000-0000-7000-8000-000000000105",
+        "name": "Dental Implants",
+        "description": "Surgical component that interfaces with the bone of the jaw or skull."
+    },
+    "fillings": {
+        "publicId": "01960000-0000-7000-8000-000000000106",
+        "name": "Fillings",
+        "description": "Restoration of lost tooth structure using materials such as composite or amalgam."
+    },
+    "orthodontics": {
+        "publicId": "01960000-0000-7000-8000-000000000100",
+        "name": "Orthodontics",
+        "description": "Braces, aligners, and jaw correction procedures."
+    },
+    "pediatric dentistry": {
+        "publicId": "01960000-0000-7000-8000-000000000103",
+        "name": "Pediatric Dentistry",
+        "description": "Oral health care for children from infancy through the teen years."
+    },
+    "root canal": {
+        "publicId": "01960000-0000-7000-8000-000000000101",
+        "name": "Root Canal",
+        "description": "Endodontic therapy to treat infection at the centre of a tooth."
+    },
+    "scaling and polishing": {
+        "publicId": "01960000-0000-7000-8000-000000000104",
+        "name": "Scaling and Polishing",
+        "description": "Deep cleaning to remove plaque and tartar buildup."
+    },
+    "teeth whitening": {
+        "publicId": "01960000-0000-7000-8000-000000000109",
+        "name": "Teeth Whitening",
+        "description": "Cosmetic procedure to lighten teeth and remove stains and discoloration."
+    },
+    "tooth extraction": {
+        "publicId": "01960000-0000-7000-8000-000000000102",
+        "name": "Tooth Extraction",
+        "description": "Removal of a tooth from its socket in the bone."
+    },
+    "veneers": {
+        "publicId": "01960000-0000-7000-8000-000000000108",
+        "name": "Veneers",
+        "description": "Thin shells of porcelain or composite resin bonded to the front of teeth."
     }
-
-# =========================
-# QUESTIONS
-# =========================
-MODE_QUESTION = "عايز ايه؟ (تشخيص / تجميل / علاج)"
-
-DIAGNOSIS_Q = {
-    "pain": "هل عندك وجع في السنان؟",
-    "bleeding": "هل في نزيف؟",
-    "swelling": "هل في تورم؟",
-    "sensitivity": "هل في حساسية؟"
 }
 
-COSMETIC_Q = {
-    "whitening": "عايز تبييض؟",
-    "braces": "مهتم بالتقويم؟",
-    "cleaning": "عايز تنظيف جير؟"
+# ---------------- MEMORY ----------------
+current_diagnosis = {
+    "diagnosis_status": "pending",
+    "diagnosis": []
 }
 
-TREATMENT_Q = {
-    "extract": "عايز خلع سن؟",
-    "filling": "محتاج حشو؟",
-    "implant": "عايز زرع سن؟"
-}
+# ---------------- SCHEMAS ----------------
+class Message(BaseModel):
+    role: str
+    content: str
 
-# =========================
 class ChatRequest(BaseModel):
-    answer: str
-    state: dict | None = None
+    history: List[Message]
 
-# =========================
-def generate_diagnosis(state):
-    a = state["answers"]
-
-    if a.get("pain") == "اه" and a.get("swelling") == "اه":
-        return {"diagnosis": "خراج"}
-
-    if a.get("bleeding") == "اه":
-        return {"diagnosis": "التهاب لثة"}
-
-    if a.get("pain") == "اه":
-        return {"diagnosis": "تسوس"}
-
-    return {"diagnosis": "سليم"}
-
-# =========================
-@app.get("/start")
-def start():
-    return {
-        "question": MODE_QUESTION,
-        "state": start_state()
-    }
-
-# =========================
+# ---------------- CHAT ENDPOINT ----------------
 @app.post("/chat")
-def chat(req: ChatRequest):
+async def chat(request: ChatRequest):
+    global current_diagnosis
 
-    state = req.state or start_state()
-    answer = req.answer.strip()
+    try:
+        history_formatted = [
+            {"role": m.role, "parts": [{"text": m.content}]}
+            for m in request.history
+        ]
 
-    # =========================
-    # MODE SELECTION
-    # =========================
-    if state["mode"] is None:
-
-        if answer in ["تشخيص", "diagnosis"]:
-            state["mode"] = "diagnosis"
-            state["current_q"] = "pain"
-
-        elif answer in ["تجميل", "cosmetic"]:
-            state["mode"] = "cosmetic"
-            state["current_q"] = "whitening"
-
-        elif answer in ["علاج", "treatment"]:
-            state["mode"] = "treatment"
-            state["current_q"] = "extract"
-
-        else:
-            return {
-                "done": False,
-                "question": MODE_QUESTION,
-                "state": state
-            }
-
-        q = state["current_q"]
-        question_map = {
-            "diagnosis": DIAGNOSIS_Q,
-            "cosmetic": COSMETIC_Q,
-            "treatment": TREATMENT_Q
-        }
-
-        return {
-            "done": False,
-            "question": question_map[state["mode"]][q],
-            "state": state
-        }
-
-    # =========================
-    # SAVE ANSWER
-    # =========================
-    q = state["current_q"]
-    state["answers"][q] = answer
-    state["asked"].append(q)
-
-    # =========================
-    # FLOW HANDLER
-    # =========================
-    flow_map = {
-        "diagnosis": DIAGNOSIS_Q,
-        "cosmetic": COSMETIC_Q,
-        "treatment": TREATMENT_Q
+        system_instruction = """
+You are a dental AI assistant.
+IMPORTANT RULES:
+1. You MUST choose CaseTypeId ONLY from this list:
+- Dental Crowns
+- Dental Implants
+- Fillings
+- Orthodontics
+- Pediatric Dentistry
+- Root Canal
+- Scaling and Polishing
+- Teeth Whitening
+- Tooth Extraction
+- Veneers
+2. Always respond in JSON ONLY:
+{
+  "reply": "...",
+  "diagnosis_status": "pending" or "completed",
+  "diagnosis": [
+    {
+      "tooth_number": [int],
+      "CaseTypeId": "string"
     }
+  ]
+}
+3. Do NOT invent new CaseTypeId.
+4. Ask one question at a time.
+5. Be medical and careful.
+"""
 
-    flow = flow_map[state["mode"]]
+        response = client.models.generate_content(
+            model="models/gemini-2.5-flash",
+            contents=history_formatted,
+            config={
+                "system_instruction": system_instruction,
+                "response_mime_type": "application/json"
+            }
+        )
 
-    # END CONDITION
-    if len(state["asked"]) >= len(flow):
-        if state["mode"] == "diagnosis":
+        data = json.loads(response.text)
+
+        # ---------------- MAP AI OUTPUT -> CONTROLLED DATA ----------------
+        mapped = []
+
+        for d in data.get("diagnosis", []):
+            case = d.get("CaseTypeId", "").strip().lower()
+
+            if case in TREATMENTS:
+                mapped.append({
+                    "tooth_number": d.get("tooth_number", []),
+                    **TREATMENTS[case]
+                })
+
+        data["diagnosis"] = mapped
+
+        # ---------------- STATUS HANDLING ----------------
+        if data.get("diagnosis_status") == "completed":
+            current_diagnosis = {
+                "diagnosis_status": "completed",
+                "diagnosis": mapped
+            }
+            data["show_side_panel"] = True
+            data["reply"] += " ألف سلامة عليك! الدكتور هيتواصل معاك قريب 😊🦷"
+        else:
+            data["show_side_panel"] = False
+
+        return data
+
+    except Exception as e:
+        if "429" in str(e) or "503" in str(e):
             return {
-                "done": True,
-                "result": generate_diagnosis(state),
-                "state": state
+                "reply": "السيرفر عليه ضغط دلوقتي، جرب بعد دقيقة 😊",
+                "diagnosis_status": "pending",
+                "show_side_panel": False,
+                "diagnosis": []
             }
 
-        return {
-            "done": True,
-            "result": {
-                "type": state["mode"],
-                "answers": state["answers"]
-            },
-            "state": state
-        }
+        raise HTTPException(status_code=500, detail=str(e))
 
-    # NEXT QUESTION
-    for key in flow:
-        if key not in state["asked"]:
-            state["current_q"] = key
-            return {
-                "done": False,
-                "question": flow[key],
-                "state": state
-            }
+
+# ---------------- GET DIAGNOSIS ----------------
+@app.get("/diagnosis")
+async def get_diagnosis():
+    return {
+        "success": True,
+        "message": "Success",
+        "data": current_diagnosis,
+        "statusCode": 200,
+        "warnings": None,
+        "error": None,
+        "links": None
+    }
